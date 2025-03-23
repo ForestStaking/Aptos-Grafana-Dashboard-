@@ -1,0 +1,211 @@
+# Aptos-Grafana-Dashboard-
+
+This guide provides a full setup for monitoring an Aptos validator node using Prometheus, Grafana, and NGINX reverse proxies.
+
+✅ Requirements
+
+Ubuntu server (node already provisioned)
+
+aptos-node binary installed
+
+Root or sudo access
+
+Domain names pointing to the server:
+
+p.foreststaking.com for Prometheus
+
+g.foreststaking.com for Grafana
+
+
+⌚ Step 1: Set Up the Aptos Validator Service
+
+File: /etc/systemd/system/validator.service
+
+[Unit]
+Description=Aptos
+After=network.target
+
+[Service]
+User=root
+Type=simple
+ExecStart=/usr/local/bin/aptos-node -f /root/mainnet/validator.yaml
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=999999
+
+[Install]
+WantedBy=multi-user.target
+
+File: /root/mainnet/validator.yaml
+
+base:
+  role: "validator"
+  data_dir: "/root/mainnet/data"
+  waypoint:
+    from_file: "/root/mainnet/waypoint.txt"
+
+storage:
+  rocksdb_configs:
+    enable_storage_sharding: true
+
+state_sync:
+  state_sync_driver:
+    bootstrapping_mode: "DownloadLatestStates"
+    continuous_syncing_mode: "ExecuteTransactionsOrApplyOutputs"
+
+consensus:
+  safety_rules:
+    service:
+      type: "local"
+    backend:
+      type: "on_disk_storage"
+      path: "/root/mainnet/data/secure-data.json"
+      namespace: ~
+    initial_safety_rules_config:
+      from_file:
+        waypoint:
+          from_file: "/root/mainnet/waypoint.txt"
+        identity_blob_path: "/root/mainnet/keys/validator-identity.yaml"
+
+execution:
+  genesis_file_location: "/root/mainnet/genesis.blob"
+  concurrency_level: 20
+
+validator_network:
+  discovery_method: "onchain"
+  mutual_authentication: true
+  identity:
+    type: "from_file"
+    path: "/root/mainnet/keys/validator-identity.yaml"
+
+full_node_networks:
+  - network_id: "public"
+    discovery_method: "onchain"
+    listen_address: "/ip4/0.0.0.0/tcp/6182"
+    identity:
+      type: "from_file"
+      path: "/root/mainnet/validator-full-node-identity.yaml"
+
+api:
+  enabled: true
+  address: "0.0.0.0:8080"
+
+mempool:
+  shared_mempool_max_concurrent_inbound_syncs: 16
+  max_broadcasts_per_peer: 4
+  default_failovers: 0
+  shared_mempool_batch_size: 200
+  shared_mempool_tick_interval_ms: 10
+
+📊 Step 2: Prometheus Setup
+
+File: /etc/systemd/system/prometheus.service
+
+[Unit]
+Description=Prometheus
+Documentation=https://prometheus.io/docs/introduction/overview/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=prometheus
+Group=prometheus
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStart=/usr/local/bin/prometheus \
+  --config.file=/etc/prometheus/prometheus.yml \
+  --storage.tsdb.path=/var/lib/prometheus \
+  --web.console.templates=/etc/prometheus/consoles \
+  --web.console.libraries=/etc/prometheus/console_libraries \
+  --web.listen-address=0.0.0.0:8888
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+
+⚠️ It's recommended to firewall port 8888 and expose via NGINX reverse proxy only.
+
+📊 Step 3: NGINX Reverse Proxy for Prometheus
+
+File: /etc/nginx/sites-available/prometheus
+
+# Prometheus Server Block (SSL)
+server {
+    listen 443 ssl;
+    server_name p.foreststaking.com;
+
+    ssl_certificate /etc/letsencrypt/live/p.foreststaking.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/p.foreststaking.com/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    location / {
+        proxy_pass http://localhost:8888;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        # Basic Auth
+        auth_basic "Restricted Access";
+        auth_basic_user_file /etc/nginx/.htpasswd;
+    }
+}
+
+# Redirect HTTP to HTTPS
+server {
+    listen 80;
+    server_name p.foreststaking.com;
+    return 301 https://$host$request_uri;
+}
+
+🌐 Step 4: Grafana Reverse Proxy (NGINX)
+
+File: /etc/nginx/sites-available/grafana
+
+# Redirect HTTP to HTTPS
+server {
+    listen 80;
+    server_name g.foreststaking.com;
+    return 301 https://$host$request_uri;
+}
+
+# Grafana SSL Proxy
+server {
+    listen 443 ssl;
+    server_name g.foreststaking.com;
+
+    ssl_certificate /etc/letsencrypt/live/g.foreststaking.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/g.foreststaking.com/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    location / {
+        proxy_pass http://localhost:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+
+✨ Final Notes
+
+Ensure your firewall only allows public traffic to ports 80/443
+
+Protect Prometheus behind basic auth (as configured)
+
+Secure /etc/nginx/.htpasswd file with strong credentials
+
+⚡ Commands to Enable Services
+
+sudo systemctl daemon-reexec
+sudo systemctl daemon-reload
+sudo systemctl enable validator prometheus
+sudo systemctl start validator prometheus
+
+📁 Optional Additions
+
+Add Grafana dashboards for Aptos metrics
+
+Install Node Exporter for system stats
+
+Configure Prometheus scrape targets in prometheus.yml
